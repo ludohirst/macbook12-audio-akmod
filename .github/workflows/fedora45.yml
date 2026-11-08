@@ -1,0 +1,245 @@
+name: Fedora 45 x86_64 akmod
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - automation/upstream-audio-driver
+  workflow_dispatch:
+    inputs:
+      testing:
+        description: Check the newest Fedora updates-testing kernel
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 4 * * *'
+    - cron: '47 5 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Audit workflow security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out workflow definitions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        shell: bash
+        run: |
+          docker build --pull --tag macbook12-zizmor .github/containers/zizmor
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt=no-new-privileges \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/.github,target=/audit/.github,readonly" \
+            macbook12-zizmor --offline --collect=all --format github /audit
+
+  build:
+    name: Build and verify two kernels offline
+    if: github.event_name != 'schedule' || (github.repository == 'ludohirst/macbook12-audio-akmod' && github.ref == 'refs/heads/main')
+    outputs:
+      verified: ${{ steps.rpms.outcome == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check kernel selection and target safeguards
+        shell: bash
+        run: |
+          bash tests/kernel-selection.sh
+          bash tests/build-target.sh
+
+      - name: Select two kernels and stage build inputs
+        env:
+          PREFLIGHT: ${{ github.event.schedule == '47 5 * * *' || (github.event_name == 'workflow_dispatch' && inputs.testing) }}
+        shell: bash
+        run: |
+          mkdir -p dist/ci/logs
+          docker build --pull --tag macbook12-fedora45 .github/containers/fedora45
+          # Mock needs mount privileges in the disposable GitHub-hosted VM.
+          docker run --detach --name fedora45-ci --privileged \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/project,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/dist/ci,target=/ci-output" \
+            macbook12-fedora45 sleep infinity
+          docker exec fedora45-ci bash -ec '
+            mkdir -p /build
+            cp -a /project/{LICENSE,README.txt,sources.lock,scripts,packaging} /build/
+          '
+          mode=--stable
+          if [[ $PREFLIGHT == true ]]; then
+            mode=--testing
+          fi
+          docker exec fedora45-ci /build/scripts/ci-fedora45.sh stage "$mode" \
+            |& tee dist/ci/logs/stage.log
+
+      - name: Build one SRPM and both kernels in offline mock
+        shell: bash
+        run: |
+          docker exec fedora45-ci unshare --net -- /build/scripts/ci-fedora45.sh mock \
+            |& tee dist/ci/logs/mock.log
+
+      - name: Verify both offline akmods rebuilds and rollback
+        shell: bash
+        run: |
+          docker exec fedora45-ci unshare --net -- /build/scripts/ci-fedora45.sh akmods \
+            |& tee dist/ci/logs/akmods.log
+
+      - name: Upload verified RPMs
+        id: rpms
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fedora45-x86_64-rpms
+          path: |
+            dist/ci/srpm/*.src.rpm
+            dist/ci/mock-rpms/*.x86_64.rpm
+            dist/ci/mock-kmods/*.x86_64.rpm
+            dist/ci/kernels.txt
+            dist/ci/source.sha256
+            dist/ci/verification-kmod/*.x86_64.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize the verified build
+        if: steps.rpms.outcome == 'success'
+        shell: bash
+        run: docker exec fedora45-ci /build/scripts/ci-fedora45.sh summary "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fedora45-x86_64-logs
+          path: |
+            dist/ci/logs/*.log
+            dist/ci/srpm/*.log
+            dist/ci/mock-rpms/*.log
+            dist/ci/mock-kmods/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish-copr:
+    name: Publish and verify COPR RPMs
+    needs: [security, build]
+    if: needs.build.outputs.verified == 'true' && (github.event_name == 'push' || github.event.schedule == '23 4 * * *') && github.repository == 'ludohirst/macbook12-audio-akmod' && github.ref == 'refs/heads/main'
+    environment: copr-publish
+    permissions:
+      actions: read # Download the tested SRPM from this run.
+      contents: read
+    concurrency:
+      group: copr-fedora45-x86_64
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the COPR version comparison script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download RPMs from this successful build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name fedora45-x86_64-rpms --dir "$RUNNER_TEMP/copr-rpms"
+
+      - name: Check whether the SRPM is newer than the published package
+        id: candidate
+        shell: bash
+        run: |
+          docker build --pull --tag macbook12-fedora45 .github/containers/fedora45
+          docker run --detach --name copr-submit \
+            --mount "type=bind,source=$RUNNER_TEMP/copr-rpms/srpm,target=/srpm,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts/copr-candidate.py,target=/copr-candidate.py,readonly" \
+            macbook12-fedora45 sleep infinity
+          docker exec copr-submit dnf -y install copr-cli dnf5-plugins python3-rpm
+          evr=$(docker exec copr-submit bash -ec '
+            shopt -s nullglob
+            sources=(/srpm/macbook12-audio-kmod-*.src.rpm)
+            test "${#sources[@]}" -eq 1
+            rpm -qp --qf "%{EPOCHNUM} %{VERSION} %{RELEASE}" "${sources[0]}"
+          ')
+          decision=$(docker exec copr-submit python3 /copr-candidate.py "$evr")
+          echo "decision=$decision" >> "$GITHUB_OUTPUT"
+          echo "evr=$evr" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate with COPR and submit if newer
+        if: steps.candidate.outputs.decision == 'publish'
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_PUBLISH_CONFIG }}
+          COPR_DECISION: ${{ steps.candidate.outputs.decision }}
+        shell: bash
+        run: |
+          if [[ -z $COPR_CONFIG ]]; then
+            echo '::error::Add COPR_PUBLISH_CONFIG to the copr-publish environment.'
+            exit 1
+          fi
+          printf '%s\n' "$COPR_CONFIG" | docker exec -i copr-submit bash -c '
+            set -euo pipefail
+            umask 077
+            config=$(mktemp)
+            trap '\''rm -f -- "$config"'\'' EXIT
+            cat > "$config"
+            if ! python3 -c "
+          import configparser
+          import sys
+
+          import requests
+
+          base = \"https://copr.fedorainfracloud.org\"
+          try:
+              config = configparser.ConfigParser(interpolation=None)
+              config.read(sys.argv[1])
+              settings = config[\"copr-cli\"]
+              if settings[\"copr_url\"].rstrip(\"/\") != base or settings[\"username\"] != \"ludohirst\":
+                  sys.exit(1)
+              result = requests.get(
+                  base + \"/api_3/auth-check\",
+                  auth=(settings[\"login\"], settings[\"token\"]),
+                  timeout=20,
+                  allow_redirects=False,
+              )
+              sys.exit(0 if result.status_code == 200 and result.json()[\"name\"] == \"ludohirst\" else 1)
+          except (KeyError, ValueError, configparser.Error, requests.RequestException):
+              sys.exit(1)
+          " "$config"; then
+              echo "::error::COPR did not authenticate COPR_PUBLISH_CONFIG as ludohirst."
+              exit 1
+            fi
+            echo "COPR authenticated the copr-publish environment credential."
+            if [[ $1 == publish ]]; then
+              copr-cli --config "$config" build --chroot fedora-45-x86_64 \
+                ludohirst/macbook12-audio-akmod /srpm/macbook12-audio-kmod-*.src.rpm
+            fi
+          ' _ "$COPR_DECISION" | tee "$RUNNER_TEMP/copr-submission.log"
+          build_id=$(sed -nE 's/^Created builds: ([0-9]+)$/\1/p' "$RUNNER_TEMP/copr-submission.log")
+          if [[ $build_id =~ ^[0-9]+$ ]]; then
+            printf '\n[COPR build %s](https://copr.fedorainfracloud.org/coprs/build/%s)\n\n' \
+              "$build_id" "$build_id" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '\n[COPR project builds](https://copr.fedorainfracloud.org/coprs/ludohirst/macbook12-audio-akmod/builds/)\n\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install both COPR RPMs in a clean Fedora 45 container
+        if: steps.candidate.outputs.decision == 'publish' || steps.candidate.outputs.decision == 'verify'
+        env:
+          CANDIDATE_EVR: ${{ steps.candidate.outputs.evr }}
+        shell: bash
+        run: |
+          docker run --rm \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/scripts/copr-candidate.py,target=/copr-candidate.py,readonly" \
+            macbook12-fedora45 bash -ec '
+              dnf -y --setopt=install_weak_deps=False install dnf5-plugins python3-rpm >&2
+              python3 /copr-candidate.py "$1" --smoke-install
+            ' _ "$CANDIDATE_EVR" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

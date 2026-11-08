@@ -1,0 +1,110 @@
+name: Watch upstream audio driver
+
+on:
+  schedule:
+    - cron: '37 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      verify_credentials:
+        description: Verify the App token even when upstream has no changes
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: upstream-audio-driver
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    name: Propose a driver update
+    if: github.repository == 'ludohirst/macbook12-audio-akmod' && github.ref == 'refs/heads/main'
+    environment: upstream-driver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Calculate the new driver pin and RPM release
+        id: pin
+        shell: bash
+        run: |
+          bash scripts/update-driver-pin.sh
+          if ! git diff --quiet -- sources.lock packaging/macbook12-audio-kmod.spec; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get the repository-scoped PR bot token
+        id: app
+        if: steps.pin.outputs.changed == 'true' || inputs.verify_credentials
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.UPSTREAM_APP_CLIENT_ID }}
+          private-key: ${{ secrets.UPSTREAM_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Verify the App token is scoped to this repository
+        if: inputs.verify_credentials
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        shell: bash
+        run: |
+          gh api installation/repositories | jq -e --arg repo "$GITHUB_REPOSITORY" \
+            '.total_count == 1 and .repositories[0].full_name == $repo' >/dev/null
+          echo "Verified App authentication for $GITHUB_REPOSITORY."
+
+      - name: Open or refresh the review PR
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        shell: bash
+        run: |
+          branch=automation/upstream-audio-driver
+          spec=packaging/macbook12-audio-kmod.spec
+          old=$(git show HEAD:sources.lock | sed -n 's/^driver_commit=//p')
+          new=$(sed -n 's/^driver_commit=//p' sources.lock)
+          title="Update audio driver to ${new:0:12}"
+          body="$RUNNER_TEMP/upstream-driver-pr.md"
+          cat > "$body" <<EOF
+          Update the pinned audio driver from \`$old\` to \`$new\`. This PR records the source archive SHA-256 and increments the RPM release.
+
+          [Review the upstream diff](https://github.com/leifliddy/macbook12-audio-driver/compare/$old...$new).
+
+          See the Fedora 45 check on this PR for the offline build and RPM artifacts.
+          Review the driver changes and merge manually after CI passes. Test audio on the MacBook when the changes affect runtime behavior.
+          EOF
+
+          gh auth setup-git
+          existing=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          git add sources.lock "$spec"
+          bot_email=upstream-audio-driver@users.noreply.github.com
+          git -c user.name='Upstream audio driver automation' -c user.email="$bot_email" \
+            commit -m "$title"
+          if [[ -n $existing ]]; then
+            git fetch --no-tags origin "refs/heads/$branch"
+            test "$(git rev-parse FETCH_HEAD)" = "$existing"
+            if [[ $(git show -s --format=%ae "$existing") != "$bot_email" ]]; then
+              echo "::error::The reserved upstream review branch has a non-bot head. Review it before updating."
+              exit 1
+            fi
+          fi
+          if [[ -z $existing ]] || ! git diff --quiet "$existing" HEAD; then
+            git push --force-with-lease="refs/heads/$branch:$existing" origin "HEAD:refs/heads/$branch"
+          fi
+
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" \
+            --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [[ -n $pr ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$pr" \
+              -f title="$title" -F body=@"$body" --silent
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$GITHUB_REF_NAME" \
+              --head "$branch" --title "$title" --body-file "$body"
+          fi

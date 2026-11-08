@@ -1,0 +1,19 @@
+specfile_path: packaging/macbook12-audio-kmod.spec
+downstream_package_name: macbook12-audio-kmod
+update_release: false
+srpm_build_deps:
+  - bash
+  - coreutils
+  - curl
+  - grep
+  - gzip
+  - kmodtool
+  - sed
+  - tar
+  - xz
+actions:
+  create-archive: scripts/prepare-sources.sh dist/packit
+  # The spec already names and unpacks the pinned archive.
+  fix-spec-file: /usr/bin/true
+# Select the authenticated COPR owner and project explicitly when submitting.
+jobs: []

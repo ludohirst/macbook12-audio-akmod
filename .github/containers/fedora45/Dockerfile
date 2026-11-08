@@ -1,0 +1,1 @@
+FROM registry.fedoraproject.org/fedora:45@sha256:fd31d2f9dfd835cf7398af9cb6cbbbffbd33ffac2d5204042ea14157455b63a2

@@ -1,0 +1,9 @@
+# Private HDA header source; independent of the Fedora kernels being built.
+linux_version=7.2.15
+linux_url=https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.15.tar.xz
+# https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
+linux_sha256=d0f6b1d7324c937ccaeb5c4ca7084bfcf71db2edb3e2d3a31f0ad83a681809ab
+
+driver_commit=4cdfcdbac2db3f300cc45d9679cfd21df6590a8a
+driver_url=https://codeload.github.com/leifliddy/macbook12-audio-driver/tar.gz/4cdfcdbac2db3f300cc45d9679cfd21df6590a8a
+driver_sha256=1da62e4a80332240977fb37424853b7992516d00236cc3b86b0809efbd6d92e3

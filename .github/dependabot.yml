@@ -1,0 +1,30 @@
+version: 2
+registries:
+  fedora:
+    type: docker-registry
+    url: https://registry.fedoraproject.org
+    # Docker registry validation requires these fields; empty means anonymous.
+    username: ""
+    password: ""
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker
+    # Declare the public registry so Dependabot's egress proxy allows it.
+    registries:
+      - fedora
+    directories:
+      - /.github/containers/fedora45
+      - /.github/containers/zizmor
+    schedule:
+      interval: weekly
+    ignore:
+      # Refresh the digest of Fedora 45 without switching Fedora releases.
+      - dependency-name: fedora
+        versions: ["> 45", "< 45"]
