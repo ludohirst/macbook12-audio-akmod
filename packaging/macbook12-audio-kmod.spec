@@ -18,7 +18,7 @@ done
 
 Name:           %{kmodname}-kmod
 Version:        0.1
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Replacement CS420x kernel module for the 12-inch MacBook
 License:        GPL-2.0-or-later
 URL:            https://github.com/leifliddy/macbook12-audio-driver
