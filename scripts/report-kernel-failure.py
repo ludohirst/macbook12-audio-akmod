@@ -76,6 +76,9 @@ def read_failure(step):
                 and (record.kernel == "-" or KERNEL.fullmatch(record.kernel))
                 and plain_description(record.detail)):
             return record
+    # Docker can fail before the container starts and writes its first record.
+    if step in ("Set up job", "Check out sources", "Select two kernels and stage build inputs"):
+        return Failure("setup", "-", step, "unknown")
     return Failure("workflow", "-", step if plain_description(step) else "Build job", "unknown")
 
 

@@ -159,7 +159,8 @@ class KernelIssueTests(unittest.TestCase):
         self.assertIn("attempt 1", issue["body"])
         self.assertIn("Select two kernels and stage build inputs", issue["body"])
         self.assertIn("could not be attributed to one kernel", issue["body"])
-        self.assertIn("checkpoint", issue["body"].lower())
+        self.assertIn("infrastructure", issue["body"])
+        self.assertIn("setup", issue["title"])
 
 
 if __name__ == "__main__":
