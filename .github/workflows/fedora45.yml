@@ -43,6 +43,8 @@ jobs:
     if: github.event_name != 'schedule' || (github.repository == 'ludohirst/macbook12-audio-akmod' && github.ref == 'refs/heads/main')
     outputs:
       verified: ${{ steps.rpms.outcome == 'success' }}
+      failure_context: ${{ steps.diagnostics.outputs.context }}
+      known_targets: ${{ steps.diagnostics.outputs.targets }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -51,11 +53,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check kernel selection and target safeguards
+      - name: Test kernel selection, target safeguards and failure reporting
         shell: bash
         run: |
           bash tests/kernel-selection.sh
           bash tests/build-target.sh
+          bash tests/mock-failure.sh
+          python3 tests/test_kernel_failure_issues.py
 
       - name: Select two kernels and stage build inputs
         env:
@@ -124,6 +128,50 @@ jobs:
             dist/ci/mock-kmods/*.log
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Collect scheduled kernel failure details
+        id: diagnostics
+        if: failure() && github.event_name == 'schedule'
+        shell: bash
+        run: |
+          # Encode file contents as single-line JSON for the Actions output protocol.
+          for pair in context:failure-context.tsv targets:kernels.txt; do
+            file="dist/ci/${pair#*:}"
+            if [[ -r $file ]]; then
+              printf '%s=%s\n' "${pair%%:*}" "$(jq -Rsc . "$file")" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  report-kernel-failure:
+    name: Report scheduled kernel failure
+    needs: build
+    if: >-
+      failure() && needs.build.result == 'failure' &&
+      github.repository == 'ludohirst/macbook12-audio-akmod' && github.ref == 'refs/heads/main' &&
+      github.event_name == 'schedule' &&
+      (github.event.schedule == '23 4 * * *' || github.event.schedule == '47 5 * * *')
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    concurrency:
+      group: fedora45-kernel-failure-issues
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the scheduled revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_TRACK: ${{ github.event.schedule == '47 5 * * *' && 'updates-testing' || 'stable' }}
+          FAILURE_CONTEXT: ${{ needs.build.outputs.failure_context }}
+          KNOWN_TARGETS: ${{ needs.build.outputs.known_targets }}
+        run: python3 scripts/report-kernel-failure.py
 
   publish-copr:
     name: Publish and verify COPR RPMs

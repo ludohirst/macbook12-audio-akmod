@@ -19,11 +19,14 @@ export PATH="$work:$PATH"
 export TEST_STABLE=$'7.2.15-300.fc45.x86_64\n7.2.11-300.fc45.x86_64\n7.2.15-300.fc45.x86_64'
 export TEST_TESTING=7.3.3-300.fc45.x86_64
 selector="$repo/scripts/select-test-kernels.sh"
+export KERNEL_CHANNELS_FILE="$work/channels"
 expected=$'7.2.11-300.fc45.x86_64\n7.2.15-300.fc45.x86_64'
 test "$("$selector")" = "$expected"
 test "$("$selector" --testing)" = $'7.2.15-300.fc45.x86_64\n7.3.3-300.fc45.x86_64'
+test "$(cat "$KERNEL_CHANNELS_FILE")" = $'7.2.15-300.fc45.x86_64\tstable\n7.3.3-300.fc45.x86_64\tupdates-testing'
 TEST_TESTING=7.2.15-300.fc45.x86_64
 test "$("$selector" --testing)" = "$expected"
+test "$(cut -f2 "$KERNEL_CHANNELS_FILE")" = $'stable\nstable'
 
 reject() {
     if "$selector" "$@" > "$work/output" 2> "$work/error"; then
@@ -33,6 +36,8 @@ reject() {
     test ! -s "$work/output"
 }
 TEST_DNF_STATUS=1 reject
+TEST_STABLE=7.2.15-300.fc45.x86_64 reject
+test "$(cat "$KERNEL_CHANNELS_FILE")" = $'7.2.15-300.fc45.x86_64\tstable'
 for TEST_STABLE in '' '7.2.15-300.fc45.x86_64' \
     $'7.2.15-300.fc45.x86_64\n7.2.15-300.fc45.x86_64' \
     $'7.2.11-300.fc44.x86_64\n7.2.15-300.fc45.x86_64' \
@@ -42,5 +47,6 @@ done
 TEST_STABLE=$expected
 TEST_TESTING=$'7.3.3-300.fc45.x86_64\n7.3.4-300.fc45.x86_64'
 reject --testing
+test "$(cat "$KERNEL_CHANNELS_FILE")" = $'7.2.15-300.fc45.x86_64\tstable'
 reject --unknown
 printf 'Kernel selection regression checks passed.\n'
